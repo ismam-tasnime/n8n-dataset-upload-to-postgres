@@ -1,0 +1,8 @@
+Order ID, Order Date ,Customer Name,Region,Amount (Tk),Qty,Phone,Remarks,
+1001,15/01/2026,  Rahim Uddin ,Dhaka,"Tk 1,250",2,01712345678,,
+1002,3-Feb-2026,Karim Traders,Chattogram,"BDT 12,400.50",10,01898765432,N/A,
+1003,28/02/2026,Nasrin Akter,Sylhet,(300),1,01555123456,,
+1004,05/03/2026,"Hossain & Sons",Dhaka,"৳ 2,000",NA,01911222333,-,
+1002,3-Feb-2026,Karim Traders,Chattogram,"BDT 12,400.50",10,01898765432,N/A,
+,,,,,,,,
+1005,2026-03-18,Mitu Store,khulna,950,3,01633444555,null,
