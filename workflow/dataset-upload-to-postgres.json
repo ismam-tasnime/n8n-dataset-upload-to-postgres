@@ -1,0 +1,374 @@
+{
+  "name": "Dataset Upload → PostgreSQL",
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "none",
+        "formTitle": "Upload Dataset to PostgreSQL",
+        "formDescription": "Upload a CSV or Excel file (.csv, .xlsx, .xls). Excel files are converted to CSV, the data is cleaned, then loaded into your local PostgreSQL database. Leave table name empty to use the file name.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Dataset (CSV or Excel)",
+              "fieldType": "file",
+              "fieldName": "dataset",
+              "multipleFiles": false,
+              "acceptFileTypes": ".csv,.xlsx,.xls",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Table name (optional)",
+              "fieldType": "text",
+              "fieldName": "table_name",
+              "placeholder": "e.g. sales_2026",
+              "defaultValue": "",
+              "requiredField": false
+            }
+          ]
+        },
+        "responseMode": "onReceived",
+        "addFormPage": "",
+        "options": {
+          "buttonLabel": "Upload",
+          "path": "upload-dataset",
+          "respondWithOptions": {
+            "values": {
+              "respondWith": "text",
+              "formSubmittedText": "Got it. Your dataset is being loaded into PostgreSQL."
+            }
+          }
+        }
+      },
+      "id": "e688786c-75a3-4b66-96c1-9cbf0597c872",
+      "name": "Upload Dataset",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "d9333879-068b-4bca-8832-c6ba35298e88"
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "dataset",
+        "options": {
+          "enableBOM": true,
+          "headerRow": true,
+          "includeEmptyCells": true
+        }
+      },
+      "id": "3dc92328-f0e6-4cac-aa12-8d96170273c4",
+      "name": "Read CSV",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        896,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Looks at every row once and returns ONE item: the CREATE TABLE statement.\n// The rows themselves are inserted by the Postgres Insert node, outside the task runner.\nconst form = $('Upload Dataset').first();\nconst fileName = (form.binary && form.binary.dataset && form.binary.dataset.fileName) || 'dataset.csv';\nconst clean = (s) => {\n  let n = String(s || '').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');\n  if (!n) n = 'col';\n  if (/^[0-9]/.test(n)) n = 't_' + n;\n  return n.slice(0, 60);\n};\nconst tableName = clean(form.json.table_name || fileName.replace(/\\.[^.]+$/, ''));\n\nconst items = $input.all();\nif (items.length === 0) throw new Error('The uploaded file has no rows.');\nconst cols = Object.keys(items[0].json);\n\n// Guess a type per column: BIGINT, NUMERIC, DATE, or TEXT\n// Codes with leading zeros (phone numbers, IDs like 00123) stay TEXT so the zeros aren't lost\nconst isInt = v => /^-?\\d+$/.test(v) && v.replace('-', '').length < 18;\nconst isNum = v => /^-?\\d*\\.?\\d+(e[-+]?\\d+)?$/i.test(v);\nconst isDate = v => /^\\d{4}-\\d{2}-\\d{2}$/.test(v);\nconst st = cols.map(() => ({ any: false, lead: false, int: true, num: true, date: true }));\nfor (const it of items) {\n  const r = it.json;\n  for (let i = 0; i < cols.length; i++) {\n    const t = st[i];\n    if (t.lead) continue;\n    const v = r[cols[i]];\n    if (v === null || v === undefined) continue;\n    const s = String(v).trim();\n    if (!s) continue;\n    t.any = true;\n    if (/^-?0\\d/.test(s)) { t.lead = true; continue; }\n    if (t.int && !isInt(s)) t.int = false;\n    if (t.num && !isNum(s)) t.num = false;\n    if (t.date && !isDate(s)) t.date = false;\n  }\n}\nconst types = st.map(t => (!t.any || t.lead) ? 'TEXT' : t.int ? 'BIGINT' : t.num ? 'NUMERIC' : t.date ? 'DATE' : 'TEXT');\n\nconst createSql = 'CREATE TABLE IF NOT EXISTS public.\"' + tableName + '\" (' +\n  cols.map((c, i) => '\"' + c + '\" ' + types[i]).join(', ') +\n  ', loaded_at TIMESTAMP DEFAULT now());';\n\nlet rowsUploaded = items.length;\ntry { rowsUploaded = $('Read CSV').all().length; } catch (e) {}\nreturn [{ json: { table: tableName, createSql, rowsUploaded, rowsAfterCleaning: items.length } }];",
+        "notice": ""
+      },
+      "id": "e4c5cfb5-1c9f-4ab0-9a84-c63e5ebf050b",
+      "name": "Build Table Schema",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "{{ $json.createSql }}",
+        "options": {}
+      },
+      "id": "ef62f7f3-6deb-4610-b3e5-6abace0aef0d",
+      "name": "Create Table",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1568,
+        80
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Dataset → PostgreSQL\n1. Upload a CSV or Excel file on the form.\n2. **Check File Type**: Excel goes through Read Excel → Convert to CSV, CSV goes straight to Read CSV.\n3. **Clean Data**: trims text, turns NA / null / - into NULL, strips thousands separators and Tk/BDT/$, converts date columns to YYYY-MM-DD, drops empty rows, empty columns and exact duplicates, and makes column names SQL-safe.\n4. **Build Table Schema** guesses column types and **Create Table** creates the table if needed.\n5. **Insert Rows** loads all rows with the native Postgres node, so large files don't overload the Code node runner.",
+        "height": 160,
+        "width": 240,
+        "color": 1
+      },
+      "id": "fdf208d4-8b99-467c-8c23-6bdef1c8ba72",
+      "name": "Sticky Note 86576bac",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1888,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 2,
+        "output": "={{ (/\\.xlsx?$/i.test($binary?.dataset?.fileName ?? '') || /spreadsheet|ms-excel/i.test($binary?.dataset?.mimeType ?? '')) ? 1 : 0 }}",
+        "looseTypeValidation": false
+      },
+      "id": "e3107f7b-e7bb-41b9-9022-4f3850670d0d",
+      "name": "Check File Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        224,
+        0
+      ],
+      "notes": "Output 0 = CSV, Output 1 = Excel"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "dataset",
+        "options": {
+          "headerRow": true,
+          "includeEmptyCells": true
+        }
+      },
+      "id": "9499725e-9f70-43e8-8b3b-41a281d27768",
+      "name": "Read Excel",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "dataset",
+        "options": {
+          "fileName": "converted.csv",
+          "headerRow": true
+        }
+      },
+      "id": "c7d61a6d-24a4-4cc4-ba40-d1bdc1914390",
+      "name": "Convert to CSV",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst rowsIn = items.length;\nconst NULLS = new Set(['', 'na', 'n/a', '#n/a', 'null', 'none', 'nil', 'nan', '-', '--', '?', '#value!', '#div/0!', '#ref!']);\nconst MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };\nconst fromExcel = (() => { try { return $('Read Excel').isExecuted; } catch (e) { return false; } })();\n\n// 1. Trim text, remove hidden characters, turn NA / null / - etc. into real NULLs\nconst cleanText = (v) => {\n  if (v === null || v === undefined) return null;\n  const s = String(v).replace(/\\u00a0/g, ' ').replace(/[\\u200b-\\u200d\\ufeff]/g, '').replace(/\\s+/g, ' ').trim();\n  return NULLS.has(s.toLowerCase()) ? null : s;\n};\n\n// 2. Numbers: strip thousands separators and currency (Tk, BDT, $), (123) -> -123\nconst cleanNumber = (s) => {\n  let t = s.replace(/^(৳|tk\\.?|bdt|\\$|€|£)\\s*/i, '').replace(/\\s*(৳|tk\\.?|bdt)$/i, '');\n  let neg = false;\n  if (/^\\(.*\\)$/.test(t)) { neg = true; t = t.slice(1, -1).trim(); }\n  if (/^-?\\d{1,3}(,\\d{3})+(\\.\\d+)?$/.test(t)) t = t.replace(/,/g, '');\n  if (/^-?\\d+(\\.\\d+)?$/.test(t)) return (neg && !t.startsWith('-') ? '-' : '') + t;\n  return s;\n};\n\n// 3. Header names: SQL-safe snake_case, blank headers named, duplicates made unique\nconst sqlName = (s) => {\n  let n = String(s || '').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');\n  if (!n) n = 'col';\n  if (/^[0-9]/.test(n)) n = 't_' + n;\n  if (n === 'loaded_at') n = 'loaded_at_src';\n  return n.slice(0, 55);\n};\nconst rawKeys = [];\nfor (const it of items) for (const k of Object.keys(it.json)) if (!rawKeys.includes(k)) rawKeys.push(k);\nconst headerMap = {};\nconst used = new Set();\nrawKeys.forEach((k, i) => {\n  let h = cleanText(k);\n  if (!h || /^__EMPTY/.test(h)) h = 'column_' + (i + 1);\n  h = sqlName(h);\n  let name = h, n = 2;\n  while (used.has(name)) name = h + '_' + n++;\n  used.add(name);\n  headerMap[k] = name;\n});\nconst cols = rawKeys.map(k => headerMap[k]);\n\nlet rows = items.map(it => {\n  const r = {};\n  for (const k of rawKeys) {\n    const v = cleanText(it.json[k]);\n    r[headerMap[k]] = v === null ? null : cleanNumber(v);\n  }\n  return r;\n});\n\n// 4. Drop fully empty rows and exact duplicate rows\nrows = rows.filter(r => cols.some(c => r[c] !== null));\nconst seenRows = new Set();\nrows = rows.filter(r => {\n  const key = JSON.stringify(cols.map(c => r[c]));\n  if (seenRows.has(key)) return false;\n  seenRows.add(key);\n  return true;\n});\n\n// 5. Drop columns that are empty in every row\nconst keepCols = cols.filter(c => rows.some(r => r[c] !== null));\n\n// 6. Dates: convert a column to YYYY-MM-DD only if every value in it is a valid date\nconst yr = (y) => { y = Number(y); return y < 100 ? 2000 + y : y; };\nconst mon = (s) => MONTHS[String(s).slice(0, 3).toLowerCase()];\nconst parseDate = (s) => {\n  let m = s.match(/^(\\d{4})[-\\/.](\\d{1,2})[-\\/.](\\d{1,2})$/);\n  if (m) return { k: 'ymd', y: +m[1], a: +m[2], b: +m[3] };\n  m = s.match(/^(\\d{1,2})[-\\/.](\\d{1,2})[-\\/.](\\d{4}|\\d{2})$/);\n  if (m) return { k: 'xx', y: yr(m[3]), a: +m[1], b: +m[2] };\n  m = s.match(/^(\\d{1,2})[-\\s]([a-z]{3,9})\\.?[-\\s,]+(\\d{4}|\\d{2})$/i);\n  if (m && mon(m[2])) return { k: 'md', y: yr(m[3]), a: mon(m[2]), b: +m[1] };\n  m = s.match(/^([a-z]{3,9})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})$/i);\n  if (m && mon(m[1])) return { k: 'md', y: +m[3], a: mon(m[1]), b: +m[2] };\n  return null;\n};\nconst isValid = (y, mo, d) => {\n  const dt = new Date(Date.UTC(y, mo - 1, d));\n  return mo >= 1 && mo <= 12 && dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;\n};\nconst pad = (n) => String(n).padStart(2, '0');\nfor (const c of keepCols) {\n  const vals = [...new Set(rows.map(r => r[c]).filter(v => v !== null))];\n  const parsed = vals.map(parseDate);\n  if (parsed.length === 0 || parsed.some(p => p === null)) continue;\n  const xx = parsed.filter(p => p.k === 'xx');\n  const aBig = xx.some(p => p.a > 12), bBig = xx.some(p => p.b > 12);\n  if (aBig && bBig) continue;\n  // dd/mm/yyyy by default; Excel's own display format is m/d/yy, so Excel uploads default to month first\n  const dayFirst = aBig ? true : bBig ? false : !fromExcel;\n  const isos = parsed.map(p => {\n    let mo = p.a, d = p.b;\n    if (p.k === 'xx' && dayFirst) { mo = p.b; d = p.a; }\n    return isValid(p.y, mo, d) ? p.y + '-' + pad(mo) + '-' + pad(d) : null;\n  });\n  if (isos.some(v => v === null)) continue;\n  const map = new Map(vals.map((v, i) => [v, isos[i]]));\n  rows.forEach(r => { if (r[c] !== null) r[c] = map.get(r[c]); });\n}\n\nif (rows.length === 0) throw new Error('No usable rows left after cleaning (' + rowsIn + ' rows uploaded).');\nreturn rows.map(r => {\n  const o = {};\n  keepCols.forEach(c => { o[c] = r[c]; });\n  return { json: o };\n});",
+        "notice": ""
+      },
+      "id": "3677c78f-8f73-46b3-9e2f-7712c6006b27",
+      "name": "Clean Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "numberInputs": 2,
+        "chooseBranchMode": "waitForAll",
+        "output": "specifiedInput",
+        "useDataOfInput": "1"
+      },
+      "id": "8032181d-60c2-47c6-832c-39bce114432c",
+      "name": "Wait for Table",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1792,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "mode": "name",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Build Table Schema').first().json.table }}"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [],
+          "schema": [],
+          "value": {}
+        },
+        "options": {
+          "queryBatching": "single",
+          "outputColumns": []
+        }
+      },
+      "id": "48ef1896-13db-42bf-96d7-b427fa93628e",
+      "name": "Insert Rows",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2016,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Upload Dataset": {
+      "main": [
+        [
+          {
+            "node": "Check File Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check File Type": {
+      "main": [
+        [
+          {
+            "node": "Read CSV",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Excel": {
+      "main": [
+        [
+          {
+            "node": "Convert to CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to CSV": {
+      "main": [
+        [
+          {
+            "node": "Read CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CSV": {
+      "main": [
+        [
+          {
+            "node": "Clean Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Data": {
+      "main": [
+        [
+          {
+            "node": "Build Table Schema",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Wait for Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Table Schema": {
+      "main": [
+        [
+          {
+            "node": "Create Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Table": {
+      "main": [
+        [
+          {
+            "node": "Wait for Table",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Wait for Table": {
+      "main": [
+        [
+          {
+            "node": "Insert Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "tags": [],
+  "description": "Form upload of a CSV or Excel file. Checks the file type, cleans the data, creates the table if needed and loads the rows into PostgreSQL."
+}
