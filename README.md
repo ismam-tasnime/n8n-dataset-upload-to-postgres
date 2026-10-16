@@ -1,14 +1,12 @@
 # Dataset Upload → PostgreSQL (n8n)
 
-An n8n workflow that turns a messy CSV or Excel file into a clean PostgreSQL table. You drop the file into a web form. n8n checks whether it's Excel or CSV, cleans the data, works out a column type for each field, creates the table if it doesn't exist yet, and inserts every row.
-
-No SQL to write, no `COPY` commands, no fixing headers by hand first.
+This n8n workflow takes a messy CSV or Excel file from a web form and loads it into PostgreSQL as a clean table. It checks whether the file is Excel or CSV, cleans the data, picks a column type for each field, creates the table if it isn't there yet, and inserts every row. You don't need to write SQL or tidy the headers first.
 
 ![Workflow](screenshots/workflow.png)
 
 ## The problem
 
-Hand-typed spreadsheets are rarely ready for a database. Amounts look like `Tk 1,250`, half the cells say `N/A`, dates come in three formats, and there's always a blank row somewhere in the middle. Loading that into Postgres usually means a round of cleanup in Excel before a single query runs. This workflow does the cleanup the same way every time.
+Spreadsheets typed by hand are rarely ready for a database. Amounts look like `Tk 1,250`, half the cells say `N/A`, dates come in three formats, and a blank row usually turns up somewhere in the middle. Getting that into Postgres normally means a round of cleanup in Excel before you can run a single query. This workflow applies the same cleanup to every file.
 
 ## How it works
 
@@ -26,40 +24,36 @@ flowchart LR
 
 | # | Node | What it does |
 |---|------|--------------|
-| 1 | **Upload Dataset** (Form Trigger) | Web form at `/form/upload-dataset`. Takes one file (`.csv`, `.xlsx`, `.xls`) and an optional table name. It replies right away with "Got it. Your dataset is being loaded into PostgreSQL." so the user isn't left staring at a spinner. |
-| 2 | **Check File Type** (Switch) | Looks at the file extension and MIME type. `.xlsx` / `.xls` or a spreadsheet MIME type goes to output 1 (Excel). Everything else goes to output 0 (CSV). |
-| 3 | **Read Excel** (Extract From File) | Reads the first sheet with the header row, keeping empty cells so columns don't shift. |
-| 4 | **Convert to CSV** (Convert to File) | Turns the Excel rows into a CSV, so both paths join at the same place and get cleaned by the same code. |
-| 5 | **Read CSV** (Extract From File) | Parses the CSV (BOM-aware, header row, empty cells kept). |
-| 6 | **Clean Data** (Code) | The cleaning rules, listed below. |
-| 7 | **Build Table Schema** (Code) | Picks the table name, guesses a type per column and builds the `CREATE TABLE IF NOT EXISTS` statement. |
-| 8 | **Create Table** (Postgres) | Runs that statement. |
-| 9 | **Wait for Table** (Merge, choose branch) | Holds the cleaned rows until the table exists, then passes them on. Without it, the insert could run before the `CREATE TABLE` finishes. |
-| 10 | **Insert Rows** (Postgres) | Inserts all rows into `public.<table>` in a single query, with columns auto-mapped. The native Postgres node does the heavy lifting here, so big files don't overload the Code node runner. |
+| 1 | Upload Dataset (Form Trigger) | A web form at `/form/upload-dataset` that accepts one file (`.csv`, `.xlsx`, `.xls`) and an optional table name. It answers straight away with "Got it. Your dataset is being loaded into PostgreSQL." so whoever uploaded the file isn't stuck waiting on the page. |
+| 2 | Check File Type (Switch) | Reads the file extension and MIME type. `.xlsx`, `.xls` or a spreadsheet MIME type goes to output 1 (Excel), and everything else goes to output 0 (CSV). |
+| 3 | Read Excel (Extract From File) | Reads the first sheet with its header row and keeps empty cells so the columns stay lined up. |
+| 4 | Convert to CSV (Convert to File) | Writes the Excel rows out as a CSV. Both paths meet at Read CSV after this and go through the same cleaning code. |
+| 5 | Read CSV (Extract From File) | Parses the CSV. It handles a BOM at the start of the file, uses the first row as headers and keeps empty cells. |
+| 6 | Clean Data (Code) | Applies the cleaning rules listed below. |
+| 7 | Build Table Schema (Code) | Chooses the table name, guesses a type for each column and writes the `CREATE TABLE IF NOT EXISTS` statement. |
+| 8 | Create Table (Postgres) | Runs that statement. |
+| 9 | Wait for Table (Merge, choose branch) | Holds the cleaned rows until the table exists, then passes them on. Without this step the insert could start before `CREATE TABLE` has finished. |
+| 10 | Insert Rows (Postgres) | Inserts every row into `public.<table>` in one query and maps the columns automatically. The insert runs in the Postgres node instead of a Code node, so large files don't overload the Code node runner. |
 
 ### Cleaning rules (Clean Data node)
 
-1. **Text** – trims spaces, removes non-breaking spaces and zero-width characters, and squeezes repeated whitespace down to one.
-2. **Nulls** – `''`, `NA`, `N/A`, `#N/A`, `null`, `none`, `nil`, `NaN`, `-`, `--`, `?`, `#VALUE!`, `#DIV/0!` and `#REF!` all become a real SQL `NULL`.
-3. **Numbers** – strips thousands separators and currency (`৳`, `Tk`, `BDT`, `$`, `€`, `£`). Accounting-style negatives like `(300)` become `-300`.
-4. **Headers** – converted to SQL-safe `snake_case`. Blank headers get a `column_N` name, duplicate headers get `_2`, `_3`, and a name starting with a digit gets a `t_` prefix.
-5. **Rows** – drops rows that are completely empty and rows that are exact duplicates.
-6. **Columns** – drops columns that are empty in every row.
-7. **Dates** – a column is converted to `YYYY-MM-DD` only if *every* value in it parses as a valid date. Supported shapes: `2026-03-18`, `15/01/2026`, `05.03.26`, `3-Feb-2026`, `Feb 3, 2026`. For ambiguous `xx/xx/yyyy` values, a day above 12 settles the order. If nothing settles it, CSV files are read as day-first and Excel files as month-first, because that's how Excel displays dates by default.
+1. Text is trimmed. Non-breaking spaces and zero-width characters are removed, and runs of whitespace collapse to a single space.
+2. `''`, `NA`, `N/A`, `#N/A`, `null`, `none`, `nil`, `NaN`, `-`, `--`, `?`, `#VALUE!`, `#DIV/0!` and `#REF!` all become a real SQL `NULL`.
+3. Numbers lose their thousands separators and currency markers (`৳`, `Tk`, `BDT`, `$`, `€`, `£`). Accounting negatives like `(300)` become `-300`.
+4. Headers are converted to SQL-safe `snake_case`. A blank header becomes `column_N`, repeated headers get `_2`, `_3` and so on, and a name that starts with a digit gets a `t_` prefix.
+5. Rows that are completely empty are dropped, and so are exact duplicates.
+6. A column with no value in any row is dropped.
+7. A column is converted to `YYYY-MM-DD` only when *every* value in it parses as a valid date. The parser understands `2026-03-18`, `15/01/2026`, `05.03.26`, `3-Feb-2026` and `Feb 3, 2026`. With ambiguous `xx/xx/yyyy` values, any day above 12 decides which number is the day. When nothing decides it, CSV files are read day first and Excel files month first, because Excel shows dates month first by default.
 
 ### Type detection (Build Table Schema node)
 
-Each column gets the narrowest type that fits every non-empty value:
+Each column gets the first type that fits all of its non-empty values, checked in the order `BIGINT`, `NUMERIC`, `DATE`, `TEXT`. A single value with a leading zero (`01712345678`, `00123`) makes the whole column `TEXT`, which keeps phone numbers and codes intact. Every table also gets a `loaded_at TIMESTAMP DEFAULT now()` column so you can tell one batch from another.
 
-`BIGINT` → `NUMERIC` → `DATE` → `TEXT`
-
-A value with a leading zero (`01712345678`, `00123`) forces the column to `TEXT`, so phone numbers and codes keep their zeros. Every table also gets a `loaded_at TIMESTAMP DEFAULT now()` column so you can tell batches apart.
-
-The table name is whatever you type in the form. Leave it blank and the file name is used instead (`Sales Report 2026.xlsx` → `sales_report_2026`).
+The table name comes from the form. Leave it blank and the file name is used instead, so `Sales Report 2026.xlsx` becomes `sales_report_2026`.
 
 ## Example
 
-`sample-data/messy_sales.csv` – 7 rows, 9 columns, the usual mess:
+`sample-data/messy_sales.csv` has 7 rows and 9 columns:
 
 | Order ID | Order Date | Customer Name | Region | Amount (Tk) | Qty | Phone | Remarks | |
 |---|---|---|---|---|---|---|---|---|
@@ -71,7 +65,7 @@ The table name is whatever you type in the form. Leave it blank and the file nam
 | | | | | | | | | |
 | 1005 | 2026-03-18 | Mitu Store | khulna | 950 | 3 | 01633444555 | null | |
 
-What lands in Postgres – 5 rows, 7 columns (+ `loaded_at`):
+After cleaning, 5 rows and 7 columns reach Postgres, plus `loaded_at`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS public."messy_sales" (
@@ -91,20 +85,22 @@ CREATE TABLE IF NOT EXISTS public."messy_sales" (
      1005 | 2026-03-18 | Mitu Store     | khulna     |       950 |   3 | 01633444555
 ```
 
-The duplicate order and the blank row are gone. `Remarks` was empty or junk in every row, so it was dropped along with the unnamed last column. Mixed date formats became one. The phone numbers kept their leading zero.
+The second copy of order 1002 and the blank row are gone. `Remarks` held nothing but blanks, `N/A`, `-` and `null`, so it was dropped along with the unnamed last column. The dates arrived in three formats and now share one, and the phone numbers still start with 0.
 
-`sample-data/messy_sales.xlsx` has the same kind of mess in an Excel file (real date cells, a duplicate, a blank row) for testing the Excel branch.
+`sample-data/messy_sales.xlsx` is an Excel file with the same kind of problems (real date cells, a duplicate row and a blank row) for testing the Excel branch.
 
 ## Setup
 
-**You need:** n8n (self-hosted) and a PostgreSQL database you can write to.
+You need a self-hosted n8n instance and a PostgreSQL database you can write to.
 
-1. **Import the workflow.** In n8n go to *Workflows → Import from File* and pick [`workflow/dataset-upload-to-postgres.json`](workflow/dataset-upload-to-postgres.json).
-2. **Add a Postgres credential.** Host, port (`5432`), database, user and password. Select it on both the **Create Table** and **Insert Rows** nodes.
-   If n8n runs in Docker and Postgres runs on your machine, use `host.docker.internal` as the host instead of `localhost`.
-3. **Test it.** Open the **Upload Dataset** node, click *Test step* and use the test form URL (`/form-test/upload-dataset`).
-4. **Publish it.** Once it's active, the form lives at `http://localhost:5678/form/upload-dataset`. Anyone with the link can load data, no n8n login needed.
-5. **Check the result:**
+1. In n8n, open *Workflows → Import from File* and choose [`workflow/dataset-upload-to-postgres.json`](workflow/dataset-upload-to-postgres.json).
+2. Create a Postgres credential with the host, port (`5432`), database, user and password, then select it on both the Create Table and Insert Rows nodes. If n8n runs in Docker and Postgres runs on your machine, use `host.docker.internal` as the host instead of `localhost`.
+3. Open the Upload Dataset node, click *Test step* and try a file through the test form URL (`/form-test/upload-dataset`).
+4. Publish the workflow. The live form is at `http://localhost:5678/form/upload-dataset`. It has no login, so anyone with the link can load data into your database.
+
+   <img src="screenshots/upload-form.png" alt="Upload form" width="420">
+
+5. Check what landed:
 
    ```sql
    SELECT * FROM public.messy_sales ORDER BY loaded_at DESC LIMIT 20;
@@ -112,10 +108,10 @@ The duplicate order and the blank row are gone. `Remarks` was empty or junk in e
 
 ## Things to know
 
-- Uploading the same file twice appends the rows again. There's no upsert. The `loaded_at` column makes it easy to find and delete a batch.
-- `CREATE TABLE IF NOT EXISTS` won't change a table that already exists. If you load a file with new or renamed columns into an existing table name, the insert fails, so give it a new name or drop the old table first.
+- Uploading the same file twice appends the rows a second time, since there's no upsert. The `loaded_at` column makes it easy to find a batch and delete it.
+- `CREATE TABLE IF NOT EXISTS` leaves an existing table as it is. If you load a file with new or renamed columns into a table name that already exists, the insert fails, so pick a new name or drop the old table first.
 - Only the first sheet of an Excel workbook is read.
-- The whole file is processed in memory, so very large files (hundreds of MB) are better loaded with `COPY`.
+- The whole file is processed in memory. For very large files (hundreds of MB), `COPY` is the better tool.
 
 ## Repo structure
 
@@ -131,12 +127,4 @@ The duplicate order and the blank row are gone. `Remarks` was empty or junk in e
 └── README.md
 ```
 
-<img src="screenshots/upload-form.png" alt="Upload form" width="420">
-
-## Built with
-
-n8n · PostgreSQL · JavaScript (Code nodes)
-
----
-
-Built by [Md Ismam Tasnime](https://github.com/ismam-tasnime)
+Built by [Md Ismam Tasnime](https://github.com/ismam-tasnime) with n8n, PostgreSQL and JavaScript Code nodes.
